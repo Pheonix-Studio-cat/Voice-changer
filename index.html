@@ -92,32 +92,28 @@ const VOICES = [
   {id:"cave",   name:"Höhle",    desc:"Viel Echo",          pitch:0.9,  ring:0,   filter:null,              shape:0,  echo:0.5},
 ];
 
-const workletCode = `
-class PitchShift extends AudioWorkletProcessor{
-  static get parameterDescriptors(){return [{name:'ratio',defaultValue:1,minValue:0.25,maxValue:4}]}
-  constructor(){super();this.size=16384;this.buf=new Float32Array(this.size);this.w=0;this.win=2048;this.phase=0;}
-  process(inputs,outputs,params){
-    const inp=inputs[0][0], out=outputs[0];
-    if(!inp){return true}
-    const r=params.ratio[0], N=this.win, S=this.size, b=this.buf;
+// Pitch-Shifter als Fallback ohne AudioWorklet (gleicher Algorithmus)
+function makeScriptShifter(ctx){
+  const node=ctx.createScriptProcessor(1024,1,1);
+  const S=16384, N=2048, b=new Float32Array(S); let w=0, phase=0;
+  node.ratio=1;
+  node.onaudioprocess=e=>{
+    const inp=e.inputBuffer.getChannelData(0), out=e.outputBuffer.getChannelData(0), r=node.ratio;
     for(let n=0;n<inp.length;n++){
-      b[this.w]=inp[n];
-      this.phase+=(1-r)/N; this.phase-=Math.floor(this.phase);
+      b[w]=inp[n]; phase+=(1-r)/N; phase-=Math.floor(phase);
       let s=0;
-      for(let k=0;k<2;k++){
-        const ph=(this.phase+k*0.5)%1, d=ph*N+1;
-        let rp=this.w-d; if(rp<0) rp+=S;
-        const i0=Math.floor(rp), f=rp-i0, i1=(i0+1)%S;
-        const v=b[i0]*(1-f)+b[i1]*f, g=Math.sin(Math.PI*ph);
-        s+=v*g*g;
-      }
-      for(let c=0;c<out.length;c++) out[c][n]=s;
-      this.w=(this.w+1)%S;
+      for(let k=0;k<2;k++){const ph=(phase+k*0.5)%1, d=ph*N+1; let rp=w-d; if(rp<0) rp+=S;
+        const i0=Math.floor(rp), f=rp-i0, v=b[i0]*(1-f)+b[(i0+1)%S]*f, g=Math.sin(Math.PI*ph); s+=v*g*g;}
+      out[n]=s; w=(w+1)%S;
     }
-    return true;
-  }
+  };
+  return node;
 }
-registerProcessor('pitch-shift',PitchShift);`;
+function setRatio(r){
+  if(!nodes) return;
+  if(nodes.ps.parameters) nodes.ps.parameters.get("ratio").setTargetAtTime(r,ctx.currentTime,0.02);
+  else nodes.ps.ratio=r;
+}
 
 const $ = id => document.getElementById(id);
 let ctx=null, stream=null, nodes=null, raf=0, current=VOICES[0], running=false;
@@ -140,19 +136,24 @@ function pickVoice(v){
   applyVoice();
 }
 function showPitch(){$("pitchV").textContent=(+$("pitch").value).toFixed(2)+"×";}
-$("pitch").oninput=()=>{showPitch(); if(nodes) nodes.ps.parameters.get("ratio").setTargetAtTime(+$("pitch").value,ctx.currentTime,0.02);};
+$("pitch").oninput=()=>{showPitch(); setRatio(+$("pitch").value);};
 $("vol").oninput=()=>{$("volV").textContent=Math.round($("vol").value*100)+"%"; if(nodes) nodes.master.gain.setTargetAtTime(+$("vol").value,ctx.currentTime,0.02);};
 
 
 async function start(){
-  ctx=new AudioContext({latencyHint:"interactive"});
-  const url=URL.createObjectURL(new Blob([workletCode],{type:"application/javascript"}));
-  await ctx.audioWorklet.addModule(url);
-  try{ if(navigator.audioSession) navigator.audioSession.type="play-and-record"; }catch(e){}
+  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia)
+    throw new Error("Dieser Browser gibt kein Mikrofon frei. Öffne die Seite direkt in Safari.");
+  const AC=window.AudioContext||window.webkitAudioContext;
+  ctx=new AC();
+  const resumed=ctx.resume(); // sofort im Tipp starten, sonst bleibt iOS stumm
+  setStatus("Frage nach dem Mikrofon …");
   stream=await navigator.mediaDevices.getUserMedia({audio:{
     echoCancellation:false, autoGainControl:false, noiseSuppression:true}});
+  await resumed;
   const src=ctx.createMediaStreamSource(stream);
-  const ps=new AudioWorkletNode(ctx,"pitch-shift");
+  let ps;
+  try{ await ctx.audioWorklet.addModule("pitch.js"); ps=new AudioWorkletNode(ctx,"pitch-shift"); }
+  catch(e){ ps=makeScriptShifter(ctx); }
   const ring=ctx.createGain();
   const osc=ctx.createOscillator(); const oscAmt=ctx.createGain(); osc.connect(oscAmt).connect(ring.gain); osc.start();
   const filter=ctx.createBiquadFilter();
@@ -170,16 +171,17 @@ async function start(){
   nodes={ps,ring,osc,oscAmt,filter,shaper,fb,wet,master,analyser};
   applyVoice();
 
-  if(ctx.state==="suspended") await ctx.resume();
+  if(ctx.state!=="running"){ try{await ctx.resume();}catch(e){} }
+  if(ctx.state!=="running") setStatus("Ton ist pausiert. Tippe Stopp und dann nochmals Start.",true);
   meter();
   running=true; $("start").textContent="Stopp"; $("start").classList.add("on");
-  setStatus("Läuft. Sprich jetzt ins iPhone.");
+  if(ctx.state==="running") setStatus("Läuft. Sprich jetzt ins iPhone.");
 }
 
 function applyVoice(){
   if(!nodes) return;
   const v=current, t=ctx.currentTime, n=nodes;
-  n.ps.parameters.get("ratio").setTargetAtTime(+$("pitch").value,t,0.02);
+  setRatio(+$("pitch").value);
   if(v.ring){n.ring.gain.value=0; n.osc.frequency.value=v.ring; n.oscAmt.gain.value=1;}
   else{n.oscAmt.gain.value=0; n.ring.gain.value=1;}
   if(v.filter){n.filter.type=v.filter[0]; n.filter.frequency.value=v.filter[1]; n.filter.Q.value=v.filter[0]==="bandpass"?1.2:0.7;}
@@ -208,7 +210,7 @@ function stop(){
 $("start").onclick=async()=>{
   if(running){stop();return;}
   try{await start();}catch(e){stop();
-    setStatus(e.name==="NotAllowedError"?"Kein Zugriff aufs Mikrofon. Erlaube es unter Einstellungen › Safari › Mikrofon und lade die Seite neu.":"Start fehlgeschlagen: "+e.message,true);}
+    setStatus(e.name==="NotAllowedError"?"Kein Zugriff aufs Mikrofon. Tippe in Safari links in der Adresszeile auf „Aa“ › Website-Einstellungen › Mikrofon › Erlauben, dann Seite neu laden.":"Fehler ("+e.name+"): "+e.message,true);}
 };
 </script>
 </body>
