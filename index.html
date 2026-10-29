@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Stimmwandler</title>
+<style>
+:root{
+  --bg:#12141a; --panel:#1b1e27; --line:#2b3040; --fg:#e8eaf0; --muted:#8f96a8;
+  --accent:#ffb020; --ok:#3ecf8e; --warn:#ff6b5b;
+  --display:"Trebuchet MS",system-ui,sans-serif; --body:system-ui,-apple-system,"Segoe UI",sans-serif;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 var(--body);
+  padding-top:calc(24px + env(safe-area-inset-top,0px));padding-bottom:40px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+.wrap{max-width:640px;margin:0 auto;display:flex;flex-direction:column;gap:18px}
+h1{font:700 1.9rem/1.1 var(--display);margin:0;letter-spacing:.01em}
+h1 span{color:var(--accent)}
+p{margin:0;color:var(--muted)}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;display:flex;flex-direction:column;gap:12px}
+.label{font-size:.75rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}
+.route{display:grid;grid-template-columns:1fr;gap:12px}
+@media(min-width:560px){.route{grid-template-columns:1fr auto 1fr;align-items:end}}
+.arrow{color:var(--accent);font-size:1.4rem;text-align:center}
+select,button{font:inherit;color:var(--fg);background:#232736;border:1px solid var(--line);border-radius:8px;padding:10px 12px;width:100%}
+button{cursor:pointer}
+button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+#start{background:var(--accent);color:#1a1300;border:0;font-weight:700;font-size:1.05rem;padding:14px}
+#start.on{background:var(--warn);color:#fff}
+.voices{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:8px}
+.voice{text-align:left;padding:12px}
+.voice b{display:block}
+.voice small{color:var(--muted)}
+.voice[aria-pressed="true"]{border-color:var(--accent);background:#2e2a1c}
+.row{display:flex;align-items:center;gap:12px}
+.row input[type=range]{flex:1;accent-color:var(--accent)}
+.val{min-width:52px;text-align:right;font-variant-numeric:tabular-nums;color:var(--muted)}
+.meter{height:10px;background:#232736;border-radius:5px;overflow:hidden}
+.meter div{height:100%;width:0;background:linear-gradient(90deg,var(--ok),var(--accent),var(--warn))}
+#status{font-size:.9rem}
+.err{color:var(--warn)}
+.tips{font-size:.9rem;color:var(--muted);padding-left:18px;margin:0}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div>
+    <h1>Stimm<span>wandler</span></h1>
+    <p>Sprich ins iPhone, die verwandelte Stimme kommt aus dem Bluetooth-Lautsprecher.</p>
+  </div>
+
+  <div class="panel">
+    <div class="label">So geht's</div>
+    <ol class="tips">
+      <li>Verbinde den Bluetooth-Lautsprecher mit dem iPhone. Kopfhörer vorher trennen.</li>
+      <li>Wähle eine Stimme und tippe auf Start.</li>
+      <li>Erlaube den Zugriff aufs Mikrofon und sprich ins iPhone.</li>
+    </ol>
+    <div id="status">Bereit.</div>
+  </div>
+
+  <div class="panel">
+    <div class="label">Stimme</div>
+    <div class="voices" id="voices"></div>
+    <div class="row"><span class="label" style="min-width:70px">Tonhöhe</span><input type="range" id="pitch" min="0.4" max="2.2" step="0.05" value="1"><span class="val" id="pitchV">1.00×</span></div>
+    <div class="row"><span class="label" style="min-width:70px">Lautst.</span><input type="range" id="vol" min="0" max="2" step="0.05" value="1"><span class="val" id="volV">100%</span></div>
+    <div class="meter"><div id="meter"></div></div>
+  </div>
+
+  <button id="start">Start</button>
+
+  <div class="panel">
+    <div class="label">Tipps</div>
+    <ul class="tips">
+      <li>Halte das iPhone etwas weg vom Lautsprecher, sonst pfeift es.</li>
+      <li>Kommt der Ton aus dem iPhone statt aus dem Lautsprecher? Wähle den Lautsprecher im Kontrollzentrum beim Musik-Feld aus.</li>
+      <li>Bluetooth hat etwas Verzögerung, das ist normal.</li>
+    </ul>
+  </div>
+</div>
+
+<script>
+const VOICES = [
+  {id:"normal", name:"Normal",   desc:"Unverändert",        pitch:1,    ring:0,   filter:null,              shape:0,  echo:0},
+  {id:"chip",   name:"Chipmunk", desc:"Hoch und schnell",   pitch:1.75, ring:0,   filter:null,              shape:0,  echo:0},
+  {id:"monster",name:"Monster",  desc:"Tief und dunkel",    pitch:0.6,  ring:0,   filter:["lowpass",1800],  shape:0,  echo:0},
+  {id:"robot",  name:"Roboter",  desc:"Metallisch",         pitch:1,    ring:55,  filter:null,              shape:0,  echo:0.15},
+  {id:"alien",  name:"Alien",    desc:"Hoch und schräg",    pitch:1.35, ring:220, filter:null,              shape:0,  echo:0.25},
+  {id:"radio",  name:"Funkgerät",desc:"Wie ein Walkie-Talkie",pitch:1,  ring:0,   filter:["bandpass",1600], shape:30, echo:0},
+  {id:"cave",   name:"Höhle",    desc:"Viel Echo",          pitch:0.9,  ring:0,   filter:null,              shape:0,  echo:0.5},
+];
+
+const workletCode = `
+class PitchShift extends AudioWorkletProcessor{
+  static get parameterDescriptors(){return [{name:'ratio',defaultValue:1,minValue:0.25,maxValue:4}]}
+  constructor(){super();this.size=16384;this.buf=new Float32Array(this.size);this.w=0;this.win=2048;this.phase=0;}
+  process(inputs,outputs,params){
+    const inp=inputs[0][0], out=outputs[0];
+    if(!inp){return true}
+    const r=params.ratio[0], N=this.win, S=this.size, b=this.buf;
+    for(let n=0;n<inp.length;n++){
+      b[this.w]=inp[n];
+      this.phase+=(1-r)/N; this.phase-=Math.floor(this.phase);
+      let s=0;
+      for(let k=0;k<2;k++){
+        const ph=(this.phase+k*0.5)%1, d=ph*N+1;
+        let rp=this.w-d; if(rp<0) rp+=S;
+        const i0=Math.floor(rp), f=rp-i0, i1=(i0+1)%S;
+        const v=b[i0]*(1-f)+b[i1]*f, g=Math.sin(Math.PI*ph);
+        s+=v*g*g;
+      }
+      for(let c=0;c<out.length;c++) out[c][n]=s;
+      this.w=(this.w+1)%S;
+    }
+    return true;
+  }
+}
+registerProcessor('pitch-shift',PitchShift);`;
+
+const $ = id => document.getElementById(id);
+let ctx=null, stream=null, nodes=null, raf=0, current=VOICES[0], running=false;
+
+function setStatus(t,err){const s=$("status");s.textContent=t;s.className=err?"err":"";}
+
+// Stimmen-Knöpfe
+VOICES.forEach(v=>{
+  const b=document.createElement("button");
+  b.className="voice"; b.id="v-"+v.id; b.setAttribute("aria-pressed", v===current);
+  b.innerHTML=`<b>${v.name}</b><small>${v.desc}</small>`;
+  b.onclick=()=>pickVoice(v);
+  $("voices").appendChild(b);
+});
+
+function pickVoice(v){
+  current=v;
+  document.querySelectorAll(".voice").forEach(b=>b.setAttribute("aria-pressed", b.id==="v-"+v.id));
+  $("pitch").value=v.pitch; showPitch();
+  applyVoice();
+}
+function showPitch(){$("pitchV").textContent=(+$("pitch").value).toFixed(2)+"×";}
+$("pitch").oninput=()=>{showPitch(); if(nodes) nodes.ps.parameters.get("ratio").setTargetAtTime(+$("pitch").value,ctx.currentTime,0.02);};
+$("vol").oninput=()=>{$("volV").textContent=Math.round($("vol").value*100)+"%"; if(nodes) nodes.master.gain.setTargetAtTime(+$("vol").value,ctx.currentTime,0.02);};
+
+
+async function start(){
+  ctx=new AudioContext({latencyHint:"interactive"});
+  const url=URL.createObjectURL(new Blob([workletCode],{type:"application/javascript"}));
+  await ctx.audioWorklet.addModule(url);
+  try{ if(navigator.audioSession) navigator.audioSession.type="play-and-record"; }catch(e){}
+  stream=await navigator.mediaDevices.getUserMedia({audio:{
+    echoCancellation:false, autoGainControl:false, noiseSuppression:true}});
+  const src=ctx.createMediaStreamSource(stream);
+  const ps=new AudioWorkletNode(ctx,"pitch-shift");
+  const ring=ctx.createGain();
+  const osc=ctx.createOscillator(); const oscAmt=ctx.createGain(); osc.connect(oscAmt).connect(ring.gain); osc.start();
+  const filter=ctx.createBiquadFilter();
+  const shaper=ctx.createWaveShaper();
+  const delay=ctx.createDelay(1); delay.delayTime.value=0.22;
+  const fb=ctx.createGain(); const wet=ctx.createGain();
+  const master=ctx.createGain(); master.gain.value=+$("vol").value;
+  const analyser=ctx.createAnalyser(); analyser.fftSize=512;
+
+  src.connect(ps).connect(ring).connect(filter).connect(shaper);
+  shaper.connect(master);
+  shaper.connect(delay); delay.connect(fb).connect(delay); delay.connect(wet).connect(master);
+  master.connect(analyser); master.connect(ctx.destination);
+
+  nodes={ps,ring,osc,oscAmt,filter,shaper,fb,wet,master,analyser};
+  applyVoice();
+
+  if(ctx.state==="suspended") await ctx.resume();
+  meter();
+  running=true; $("start").textContent="Stopp"; $("start").classList.add("on");
+  setStatus("Läuft. Sprich jetzt ins iPhone.");
+}
+
+function applyVoice(){
+  if(!nodes) return;
+  const v=current, t=ctx.currentTime, n=nodes;
+  n.ps.parameters.get("ratio").setTargetAtTime(+$("pitch").value,t,0.02);
+  if(v.ring){n.ring.gain.value=0; n.osc.frequency.value=v.ring; n.oscAmt.gain.value=1;}
+  else{n.oscAmt.gain.value=0; n.ring.gain.value=1;}
+  if(v.filter){n.filter.type=v.filter[0]; n.filter.frequency.value=v.filter[1]; n.filter.Q.value=v.filter[0]==="bandpass"?1.2:0.7;}
+  else{n.filter.type="allpass";}
+  n.shaper.curve = v.shape ? curve(v.shape) : null;
+  n.fb.gain.value=v.echo*0.8; n.wet.gain.value=v.echo;
+}
+function curve(k){const a=new Float32Array(1024);for(let i=0;i<1024;i++){const x=i/511.5-1;a[i]=(1+k)*x/(1+k*Math.abs(x));}return a;}
+
+function meter(){
+  const buf=new Float32Array(nodes.analyser.fftSize);
+  const tick=()=>{nodes.analyser.getFloatTimeDomainData(buf);let m=0;for(const x of buf)m=Math.max(m,Math.abs(x));
+    $("meter").style.width=Math.min(100,m*140)+"%"; raf=requestAnimationFrame(tick);};
+  tick();
+}
+
+function stop(){
+  cancelAnimationFrame(raf); $("meter").style.width="0";
+  if(stream) stream.getTracks().forEach(t=>t.stop());
+  if(ctx) ctx.close();
+  ctx=stream=nodes=null; running=false;
+  $("start").textContent="Start"; $("start").classList.remove("on");
+  setStatus("Gestoppt.");
+}
+
+$("start").onclick=async()=>{
+  if(running){stop();return;}
+  try{await start();}catch(e){stop();
+    setStatus(e.name==="NotAllowedError"?"Kein Zugriff aufs Mikrofon. Erlaube es unter Einstellungen › Safari › Mikrofon und lade die Seite neu.":"Start fehlgeschlagen: "+e.message,true);}
+};
+</script>
+</body>
+</html>
